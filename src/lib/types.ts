@@ -13,7 +13,7 @@ export type Event = {
   updated_at?: string;
 };
 
-export type RegularPlayer = { id: string; name: string; is_active: boolean; created_at?: string; updated_at?: string };
+export type RegularPlayer = { id: string; name: string; is_active: boolean; monthly_payment_credits: number; created_at?: string; updated_at?: string };
 
 export type Signup = {
   id: string;
@@ -25,6 +25,7 @@ export type Signup = {
   cancelled_at: string | null;
   status: SignupStatus;
   payment_status: PaymentStatus;
+  is_paid: boolean;
   created_at?: string;
   updated_at?: string;
 };

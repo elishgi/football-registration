@@ -35,6 +35,21 @@ export async function fetchRegularPlayers() { const s = await db(); const { data
 export async function fetchSignups(eventId: string) { const s = await db(); const { data } = await s.from('signups').select('*').eq('event_id', eventId).order('registered_at'); return (data || []) as Signup[]; }
 export async function fetchEventState(eventId?: string) { const event = eventId ? await (async () => { const s = await db(); const { data } = await s.from('events').select('*').eq('id', eventId).single(); return data as Event; })() : await fetchActiveEvent(); if (!event) return null; await recalculateEventSignupsWithoutRevalidation(event.id); const [regulars, signups] = await Promise.all([fetchRegularPlayers(), fetchSignups(event.id)]); return { event, regulars, lists: rankSignups(event, signups), signups }; }
 
+function paymentStateForCredits(regular: RegularPlayer) {
+  return (regular.monthly_payment_credits || 0) > 0
+    ? { payment_status: 'PAID_MONTHLY' as PaymentStatus, is_paid: true }
+    : { payment_status: 'PENDING' as PaymentStatus, is_paid: false };
+}
+
+async function consumeRegularMonthlyCredit(regular: RegularPlayer) {
+  if ((regular.monthly_payment_credits || 0) <= 0) return;
+  const s = await db();
+  await s
+    .from('regular_players')
+    .update({ monthly_payment_credits: Math.max((regular.monthly_payment_credits || 0) - 1, 0), updated_at: new Date().toISOString() })
+    .eq('id', regular.id);
+}
+
 async function syncRegularPlayersForEvent(eventId: string) {
   const s = await db();
   const [{ data: regulars }, { data: signups }] = await Promise.all([
@@ -64,22 +79,28 @@ async function syncRegularPlayersForEvent(eventId: string) {
       return;
     }
 
+    const paymentState = paymentStateForCredits(regular);
     await s.from('signups').insert({
       event_id: eventId,
       player_name: regular.name,
       regular_player_id: regular.id,
       is_regular: true,
       status: 'WAITING',
-      payment_status: 'PENDING',
+      ...paymentState,
       registered_at: regular.created_at || now,
     });
+    if (paymentState.is_paid) await consumeRegularMonthlyCredit(regular);
   }));
 }
 
 async function recalculateEventSignupsWithoutRevalidation(eventId: string) {
   const s = await db(); await syncRegularPlayersForEvent(eventId); const state = await fetchEventStateRaw(eventId); if (!state) throw new Error('אירוע לא נמצא');
   const lists = rankSignups(state.event, state.signups); const active = new Set(lists.active.map(x => x.id)); const waiting = new Set(lists.waiting.map(x => x.id));
-  await Promise.all(state.signups.map((x) => s.from('signups').update({ status: active.has(x.id) ? 'ACTIVE' : waiting.has(x.id) ? 'WAITING' : 'CANCELLED', payment_status: lists.active.concat(lists.waiting).some(y => y.id === x.id) && x.payment_status === 'PENDING' && new Date() >= new Date(`${state.event.game_date}T${state.event.payment_deadline}:00`) ? 'UNPAID_AFTER_DEADLINE' : x.payment_status, updated_at: new Date().toISOString() }).eq('id', x.id)));
+  await Promise.all(state.signups.map((x) => {
+    const isCurrent = lists.active.concat(lists.waiting).some(y => y.id === x.id);
+    const payment_status = isCurrent && !x.is_paid && x.payment_status === 'PENDING' && new Date() >= new Date(`${state.event.game_date}T${state.event.payment_deadline}:00`) ? 'UNPAID_AFTER_DEADLINE' : x.payment_status;
+    return s.from('signups').update({ status: active.has(x.id) ? 'ACTIVE' : waiting.has(x.id) ? 'WAITING' : 'CANCELLED', payment_status, is_paid: x.is_paid || payment_status === 'PAID_MONTHLY' || payment_status === 'PAID_SINGLE', updated_at: new Date().toISOString() }).eq('id', x.id);
+  }));
   return lists;
 }
 
@@ -92,12 +113,14 @@ async function fetchEventStateRaw(eventId: string) { const s = await db(); const
 export async function signupPlayer(_: unknown, formData: FormData) {
   const schema = z.object({ eventId: z.string().uuid(), mode: z.enum(['regular', 'guest']), regularPlayerId: z.string().optional(), playerName: z.string().optional() }); const v = schema.parse(Object.fromEntries(formData));
   const s = await db(); const { data: event } = await s.from('events').select('*').eq('id', v.eventId).single(); if (!event?.is_open) return { ok: false, message: 'ההרשמה סגורה.' };
-  let name = cleanName(v.playerName || ''); let regularId: string | null = null; let isRegular = false;
-  if (v.mode === 'regular') { if (!v.regularPlayerId) return { ok: false, message: 'יש לבחור שחקן קבוע מהרשימה.' }; const { data: rp } = await s.from('regular_players').select('*').eq('id', v.regularPlayerId).single(); if (!rp) return { ok: false, message: 'יש לבחור שחקן קבוע מהרשימה.' }; name = rp.name; regularId = rp.id; isRegular = true; }
+  let name = cleanName(v.playerName || ''); let regularId: string | null = null; let isRegular = false; let selectedRegular: RegularPlayer | null = null;
+  if (v.mode === 'regular') { if (!v.regularPlayerId) return { ok: false, message: 'יש לבחור שחקן קבוע מהרשימה.' }; const { data: rp } = await s.from('regular_players').select('*').eq('id', v.regularPlayerId).single(); if (!rp) return { ok: false, message: 'יש לבחור שחקן קבוע מהרשימה.' }; selectedRegular = rp as RegularPlayer; name = selectedRegular.name; regularId = selectedRegular.id; isRegular = true; }
   if (!name) return { ok: false, message: 'יש להזין שם.' };
   const { data: duplicate } = await s.from('signups').select('id').eq('event_id', v.eventId).eq('player_name', name).is('cancelled_at', null).neq('status', 'CANCELLED').maybeSingle();
   if (duplicate) return { ok: false, message: isRegular ? 'השחקן הזה כבר רשום למשחק.' : 'השם הזה כבר רשום למשחק. נא לכתוב שם ייחודי יותר, לדוגמה שם פרטי + משפחה.' };
-  const { data: inserted, error } = await s.from('signups').insert({ event_id: v.eventId, player_name: name, regular_player_id: regularId, is_regular: isRegular, status: 'WAITING', payment_status: 'PENDING' }).select('*').single(); if (error) return { ok: false, message: 'אירעה שגיאה, נסה שוב.' };
+  const paymentState = selectedRegular ? paymentStateForCredits(selectedRegular) : { payment_status: 'PENDING' as PaymentStatus, is_paid: false };
+  const { data: inserted, error } = await s.from('signups').insert({ event_id: v.eventId, player_name: name, regular_player_id: regularId, is_regular: isRegular, status: 'WAITING', ...paymentState }).select('*').single(); if (error) return { ok: false, message: 'אירעה שגיאה, נסה שוב.' };
+  if (selectedRegular && paymentState.is_paid) await consumeRegularMonthlyCredit(selectedRegular);
   await recalculateEventSignups(v.eventId); const state = await fetchEventStateRaw(v.eventId); const pos = positionForSignup(rankSignups(event as Event, state?.signups || []), inserted.id); return { ok: true, message: 'נרשמת בהצלחה', signupId: inserted.id, result: pos };
 }
 export async function cancelSignup(signupId: string, eventId: string) { const s = await db(); await s.from('signups').update({ status: 'CANCELLED', cancelled_at: new Date().toISOString() }).eq('id', signupId); await recalculateEventSignups(eventId); return { ok: true, message: 'המשתתף סומן כמבוטל' }; }
@@ -105,4 +128,14 @@ export async function saveEvent(formData: FormData) { if (!await isAdmin()) retu
 export async function addRegular(formData: FormData) { if (!await isAdmin()) return { ok: false, message: 'אין הרשאת מנהל' }; const name = cleanName(String(formData.get('name') || '')); if (!name) return { ok: false, message: 'יש להזין שם' }; const s = await db(); await s.from('regular_players').insert({ name }); const { data: events } = await s.from('events').select('id'); await Promise.all((events || []).map((event) => recalculateEventSignups(event.id))); revalidatePath('/admin'); return { ok: true, message: 'קבוע נוסף' }; }
 export async function updateRegular(formData: FormData) { if (!await isAdmin()) return; const s = await db(); await s.from('regular_players').update({ name: cleanName(String(formData.get('name'))) }).eq('id', String(formData.get('id'))); const { data: events } = await s.from('events').select('id'); await Promise.all((events || []).map((event) => recalculateEventSignups(event.id))); revalidatePath('/admin'); }
 export async function deleteRegular(id: string) { if (!await isAdmin()) return; const s = await db(); await s.from('regular_players').update({ is_active: false }).eq('id', id); const { data: events } = await s.from('events').select('id'); await Promise.all((events || []).map((event) => recalculateEventSignups(event.id))); revalidatePath('/admin'); }
-export async function updatePayment(signupId: string, eventId: string, payment_status: PaymentStatus) { if (!await isAdmin()) return; const s = await db(); await s.from('signups').update({ payment_status }).eq('id', signupId); await recalculateEventSignups(eventId); }
+export async function updatePayment(signupId: string, eventId: string, payment_status: PaymentStatus) {
+  if (!await isAdmin()) return;
+  const s = await db();
+  const { data: signup } = await s.from('signups').select('*').eq('id', signupId).single();
+  const isPaid = payment_status === 'PAID_MONTHLY' || payment_status === 'PAID_SINGLE';
+  await s.from('signups').update({ payment_status, is_paid: isPaid, updated_at: new Date().toISOString() }).eq('id', signupId);
+  if (signup?.regular_player_id && payment_status === 'PAID_MONTHLY') {
+    await s.from('regular_players').update({ monthly_payment_credits: 4, updated_at: new Date().toISOString() }).eq('id', signup.regular_player_id);
+  }
+  await recalculateEventSignups(eventId);
+}
