@@ -1,0 +1,11 @@
+create extension if not exists "pgcrypto";
+create type signup_status as enum ('ACTIVE','WAITING','CANCELLED');
+create type payment_status as enum ('PENDING','PAID_MONTHLY','PAID_SINGLE','UNPAID_AFTER_DEADLINE');
+create table regular_players (id uuid primary key default gen_random_uuid(), name text not null unique, is_active boolean not null default true, created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create table events (id uuid primary key default gen_random_uuid(), title text not null default 'כדורגל יום שני', game_date date not null, game_time time not null default '20:00', max_players integer not null default 15 check (max_players > 0), payment_deadline time not null default '17:00', is_open boolean not null default true, created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create table signups (id uuid primary key default gen_random_uuid(), event_id uuid not null references events(id) on delete cascade, player_name text not null, regular_player_id uuid references regular_players(id) on delete set null, is_regular boolean not null default false, registered_at timestamptz not null default now(), cancelled_at timestamptz, status signup_status not null default 'WAITING', payment_status payment_status not null default 'PENDING', created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create unique index unique_active_signup_name_per_event on signups(event_id, player_name) where cancelled_at is null and status <> 'CANCELLED';
+alter table regular_players enable row level security; alter table events enable row level security; alter table signups enable row level security;
+create policy "public read regulars" on regular_players for select using (is_active = true);
+create policy "public read events" on events for select using (true);
+create policy "public read signups" on signups for select using (true);
