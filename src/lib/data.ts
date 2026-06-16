@@ -11,40 +11,52 @@ const cleanName = (name: string) => name.trim().replace(/\s+/g, ' ');
 async function db() { return getSupabaseAdmin(); }
 
 export async function isAdmin() { return (await cookies()).get(ADMIN_COOKIE)?.value === process.env.ADMIN_PASSWORD && Boolean(process.env.ADMIN_PASSWORD); }
-export async function loginAdmin(_: unknown, formData: FormData) {
+export async function loginAdmin(formData: FormData) {
   const password = String(formData.get('password') || '');
-  if (!process.env.ADMIN_PASSWORD || password !== process.env.ADMIN_PASSWORD) return { ok: false, message: 'סיסמת מנהל שגויה' };
-  (await cookies()).set(ADMIN_COOKIE, password, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 60 * 60 * 24 * 30 });
-  revalidatePath('/admin'); return { ok: true, message: 'התחברת בהצלחה' };
+
+  if (!process.env.ADMIN_PASSWORD || password !== process.env.ADMIN_PASSWORD) {
+    return { ok: false, message: 'סיסמת מנהל שגויה' };
+  }
+
+  (await cookies()).set(ADMIN_COOKIE, password, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 60 * 60 * 24 * 30,
+  });
+
+  revalidatePath('/admin');
+
+  return { ok: true, message: 'התחברת בהצלחה' };
 }
 
 export async function fetchActiveEvent() { const s = await db(); const { data } = await s.from('events').select('*').order('game_date', { ascending: true }).limit(1).maybeSingle(); return data as Event | null; }
 export async function fetchRegularPlayers() { const s = await db(); const { data } = await s.from('regular_players').select('*').eq('is_active', true).order('name'); return (data || []) as RegularPlayer[]; }
 export async function fetchSignups(eventId: string) { const s = await db(); const { data } = await s.from('signups').select('*').eq('event_id', eventId).order('registered_at'); return (data || []) as Signup[]; }
-export async function fetchEventState(eventId?: string) { const event = eventId ? await (async()=>{ const s=await db(); const {data}=await s.from('events').select('*').eq('id', eventId).single(); return data as Event; })() : await fetchActiveEvent(); if (!event) return null; await recalculateEventSignups(event.id); const [regulars, signups] = await Promise.all([fetchRegularPlayers(), fetchSignups(event.id)]); return { event, regulars, lists: rankSignups(event, signups), signups }; }
+export async function fetchEventState(eventId?: string) { const event = eventId ? await (async () => { const s = await db(); const { data } = await s.from('events').select('*').eq('id', eventId).single(); return data as Event; })() : await fetchActiveEvent(); if (!event) return null; await recalculateEventSignups(event.id); const [regulars, signups] = await Promise.all([fetchRegularPlayers(), fetchSignups(event.id)]); return { event, regulars, lists: rankSignups(event, signups), signups }; }
 
 export async function recalculateEventSignups(eventId: string) {
   const s = await db(); const state = await fetchEventStateRaw(eventId); if (!state) throw new Error('אירוע לא נמצא');
-  const lists = rankSignups(state.event, state.signups); const active = new Set(lists.active.map(x=>x.id)); const waiting = new Set(lists.waiting.map(x=>x.id));
-  await Promise.all(state.signups.map((x) => s.from('signups').update({ status: active.has(x.id) ? 'ACTIVE' : waiting.has(x.id) ? 'WAITING' : 'CANCELLED', payment_status: lists.active.concat(lists.waiting).some(y=>y.id===x.id) && x.payment_status === 'PENDING' && new Date() >= new Date(`${state.event.game_date}T${state.event.payment_deadline}:00`) ? 'UNPAID_AFTER_DEADLINE' : x.payment_status, updated_at: new Date().toISOString() }).eq('id', x.id)));
+  const lists = rankSignups(state.event, state.signups); const active = new Set(lists.active.map(x => x.id)); const waiting = new Set(lists.waiting.map(x => x.id));
+  await Promise.all(state.signups.map((x) => s.from('signups').update({ status: active.has(x.id) ? 'ACTIVE' : waiting.has(x.id) ? 'WAITING' : 'CANCELLED', payment_status: lists.active.concat(lists.waiting).some(y => y.id === x.id) && x.payment_status === 'PENDING' && new Date() >= new Date(`${state.event.game_date}T${state.event.payment_deadline}:00`) ? 'UNPAID_AFTER_DEADLINE' : x.payment_status, updated_at: new Date().toISOString() }).eq('id', x.id)));
   revalidatePath('/'); revalidatePath(`/game/${eventId}`); revalidatePath('/admin'); return lists;
 }
-async function fetchEventStateRaw(eventId: string) { const s=await db(); const [{data:event},{data:signups}] = await Promise.all([s.from('events').select('*').eq('id',eventId).single(), s.from('signups').select('*').eq('event_id',eventId)]); return event ? { event: event as Event, signups: (signups || []) as Signup[] } : null; }
+async function fetchEventStateRaw(eventId: string) { const s = await db(); const [{ data: event }, { data: signups }] = await Promise.all([s.from('events').select('*').eq('id', eventId).single(), s.from('signups').select('*').eq('event_id', eventId)]); return event ? { event: event as Event, signups: (signups || []) as Signup[] } : null; }
 
 export async function signupPlayer(_: unknown, formData: FormData) {
-  const schema = z.object({ eventId: z.string().uuid(), mode: z.enum(['regular','guest']), regularPlayerId: z.string().optional(), playerName: z.string().optional() }); const v = schema.parse(Object.fromEntries(formData));
-  const s = await db(); const { data: event } = await s.from('events').select('*').eq('id', v.eventId).single(); if (!event?.is_open) return { ok:false, message:'ההרשמה סגורה.' };
+  const schema = z.object({ eventId: z.string().uuid(), mode: z.enum(['regular', 'guest']), regularPlayerId: z.string().optional(), playerName: z.string().optional() }); const v = schema.parse(Object.fromEntries(formData));
+  const s = await db(); const { data: event } = await s.from('events').select('*').eq('id', v.eventId).single(); if (!event?.is_open) return { ok: false, message: 'ההרשמה סגורה.' };
   let name = cleanName(v.playerName || ''); let regularId: string | null = null; let isRegular = false;
-  if (v.mode === 'regular') { if (!v.regularPlayerId) return { ok:false, message:'יש לבחור שחקן קבוע מהרשימה.' }; const {data:rp}=await s.from('regular_players').select('*').eq('id',v.regularPlayerId).single(); if (!rp) return {ok:false,message:'יש לבחור שחקן קבוע מהרשימה.'}; name=rp.name; regularId=rp.id; isRegular=true; }
-  if (!name) return { ok:false, message:'יש להזין שם.' };
-  const { data: duplicate } = await s.from('signups').select('id').eq('event_id', v.eventId).eq('player_name', name).is('cancelled_at', null).neq('status','CANCELLED').maybeSingle();
-  if (duplicate) return { ok:false, message: isRegular ? 'השחקן הזה כבר רשום למשחק.' : 'השם הזה כבר רשום למשחק. נא לכתוב שם ייחודי יותר, לדוגמה שם פרטי + משפחה.' };
-  const { data: inserted, error } = await s.from('signups').insert({ event_id:v.eventId, player_name:name, regular_player_id:regularId, is_regular:isRegular, status:'WAITING', payment_status:'PENDING' }).select('*').single(); if (error) return {ok:false,message:'אירעה שגיאה, נסה שוב.'};
-  await recalculateEventSignups(v.eventId); const state=await fetchEventStateRaw(v.eventId); const pos=positionForSignup(rankSignups(event as Event, state?.signups || []), inserted.id); return { ok:true, message:'נרשמת בהצלחה', signupId: inserted.id, result: pos };
+  if (v.mode === 'regular') { if (!v.regularPlayerId) return { ok: false, message: 'יש לבחור שחקן קבוע מהרשימה.' }; const { data: rp } = await s.from('regular_players').select('*').eq('id', v.regularPlayerId).single(); if (!rp) return { ok: false, message: 'יש לבחור שחקן קבוע מהרשימה.' }; name = rp.name; regularId = rp.id; isRegular = true; }
+  if (!name) return { ok: false, message: 'יש להזין שם.' };
+  const { data: duplicate } = await s.from('signups').select('id').eq('event_id', v.eventId).eq('player_name', name).is('cancelled_at', null).neq('status', 'CANCELLED').maybeSingle();
+  if (duplicate) return { ok: false, message: isRegular ? 'השחקן הזה כבר רשום למשחק.' : 'השם הזה כבר רשום למשחק. נא לכתוב שם ייחודי יותר, לדוגמה שם פרטי + משפחה.' };
+  const { data: inserted, error } = await s.from('signups').insert({ event_id: v.eventId, player_name: name, regular_player_id: regularId, is_regular: isRegular, status: 'WAITING', payment_status: 'PENDING' }).select('*').single(); if (error) return { ok: false, message: 'אירעה שגיאה, נסה שוב.' };
+  await recalculateEventSignups(v.eventId); const state = await fetchEventStateRaw(v.eventId); const pos = positionForSignup(rankSignups(event as Event, state?.signups || []), inserted.id); return { ok: true, message: 'נרשמת בהצלחה', signupId: inserted.id, result: pos };
 }
-export async function cancelSignup(signupId: string, eventId: string) { const s=await db(); await s.from('signups').update({status:'CANCELLED', cancelled_at:new Date().toISOString()}).eq('id', signupId); await recalculateEventSignups(eventId); return {ok:true,message:'המשתתף סומן כמבוטל'}; }
-export async function saveEvent(_:unknown, formData:FormData) { if(!await isAdmin()) return {ok:false,message:'אין הרשאת מנהל'}; const s=await db(); const payload={title:String(formData.get('title')||'כדורגל יום שני'),game_date:String(formData.get('game_date')),game_time:String(formData.get('game_time')||'20:00'),max_players:Number(formData.get('max_players')||15),payment_deadline:String(formData.get('payment_deadline')||'17:00'),is_open:formData.get('is_open')==='on'}; const id=String(formData.get('id')||''); if(id) await s.from('events').update(payload).eq('id',id); else await s.from('events').insert(payload); revalidatePath('/admin'); revalidatePath('/'); return {ok:true,message:'המשחק נשמר'}; }
-export async function addRegular(_:unknown, formData:FormData){ if(!await isAdmin()) return {ok:false,message:'אין הרשאת מנהל'}; const name=cleanName(String(formData.get('name')||'')); if(!name) return {ok:false,message:'יש להזין שם'}; const s=await db(); await s.from('regular_players').insert({name}); revalidatePath('/admin'); return {ok:true,message:'קבוע נוסף'}; }
-export async function updateRegular(formData:FormData){ if(!await isAdmin()) return; const s=await db(); await s.from('regular_players').update({name:cleanName(String(formData.get('name')))}).eq('id',String(formData.get('id'))); revalidatePath('/admin'); }
-export async function deleteRegular(id:string){ if(!await isAdmin()) return; const s=await db(); await s.from('regular_players').update({is_active:false}).eq('id',id); revalidatePath('/admin'); }
-export async function updatePayment(signupId:string,eventId:string,payment_status:PaymentStatus){ if(!await isAdmin()) return; const s=await db(); await s.from('signups').update({payment_status}).eq('id',signupId); await recalculateEventSignups(eventId); }
+export async function cancelSignup(signupId: string, eventId: string) { const s = await db(); await s.from('signups').update({ status: 'CANCELLED', cancelled_at: new Date().toISOString() }).eq('id', signupId); await recalculateEventSignups(eventId); return { ok: true, message: 'המשתתף סומן כמבוטל' }; }
+export async function saveEvent(formData: FormData) { if (!await isAdmin()) return { ok: false, message: 'אין הרשאת מנהל' }; const s = await db(); const payload = { title: String(formData.get('title') || 'כדורגל יום שני'), game_date: String(formData.get('game_date')), game_time: String(formData.get('game_time') || '20:00'), max_players: Number(formData.get('max_players') || 15), payment_deadline: String(formData.get('payment_deadline') || '17:00'), is_open: formData.get('is_open') === 'on' }; const id = String(formData.get('id') || ''); if (id) await s.from('events').update(payload).eq('id', id); else await s.from('events').insert(payload); revalidatePath('/admin'); revalidatePath('/'); return { ok: true, message: 'המשחק נשמר' }; }
+export async function addRegular(formData: FormData) { if (!await isAdmin()) return { ok: false, message: 'אין הרשאת מנהל' }; const name = cleanName(String(formData.get('name') || '')); if (!name) return { ok: false, message: 'יש להזין שם' }; const s = await db(); await s.from('regular_players').insert({ name }); revalidatePath('/admin'); return { ok: true, message: 'קבוע נוסף' }; }
+export async function updateRegular(formData: FormData) { if (!await isAdmin()) return; const s = await db(); await s.from('regular_players').update({ name: cleanName(String(formData.get('name'))) }).eq('id', String(formData.get('id'))); revalidatePath('/admin'); }
+export async function deleteRegular(id: string) { if (!await isAdmin()) return; const s = await db(); await s.from('regular_players').update({ is_active: false }).eq('id', id); revalidatePath('/admin'); }
+export async function updatePayment(signupId: string, eventId: string, payment_status: PaymentStatus) { if (!await isAdmin()) return; const s = await db(); await s.from('signups').update({ payment_status }).eq('id', signupId); await recalculateEventSignups(eventId); }
