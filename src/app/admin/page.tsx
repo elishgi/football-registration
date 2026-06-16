@@ -46,8 +46,103 @@ function RegularPlayersList({ regulars }: { regulars: RegularPlayer[] }) {
 }
 
 export default async function AdminPage() {
-  if (!await isAdmin()) return <main><section className="hero"><h1>כניסת מנהל</h1><form action={loginAdmin}><label>סיסמת מנהל<input type="password" name="password" /></label><button className="primary">כניסה</button></form></section></main>;
+  if (!await isAdmin()) return <main><section className="hero"><h1>כניסת מנהל</h1><form action={async (formData) => { 'use server'; await loginAdmin(formData); }}><label>סיסמת מנהל<input type="password" name="password" /></label><button className="primary">כניסה</button></form></section></main>;
   const [state, regulars] = await Promise.all([fetchEventState(), fetchRegularPlayers()]);
   const event = state?.event;
-  return <main><section className="hero"><h1>ניהול הרשמה לכדורגל</h1><p>פתיחת משחק, קבועים, תשלום והעתקה לוואטסאפ.</p>{event && <WhatsappCopy event={event} lists={state.lists}/>}</section><div className="admin-grid"><section className="card"><h2>{event?'עריכת משחק':'פתיחת משחק חדש'}</h2><form action={saveEvent}>{event && <input type="hidden" name="id" value={event.id}/>}<label>שם משחק<input name="title" defaultValue={event?.title || 'כדורגל יום שני'}/></label><label>תאריך<input type="date" name="game_date" defaultValue={event?.game_date || new Date().toISOString().slice(0,10)}/></label><label>שעה<input type="time" name="game_time" defaultValue={event?.game_time || '20:00'}/></label><label>מקסימום שחקנים<input type="number" name="max_players" defaultValue={event?.max_players || 15}/></label><label>דדליין תשלום<input type="time" name="payment_deadline" defaultValue={event?.payment_deadline || '17:00'}/></label><label><span><input style={{width:'auto'}} type="checkbox" name="is_open" defaultChecked={event?.is_open ?? true}/> ההרשמה פתוחה</span></label><button className="primary">שמור משחק</button></form></section><section className="card"><h2>שחקנים קבועים</h2><form action={addRegular}><label>הוסף קבוע<input name="name" placeholder="יוסי כהן"/></label><button className="primary">הוסף קבוע</button></form><RegularPlayersList regulars={regulars}/></section></div>{event && <section className="card"><h2>נרשמים</h2><form action={async()=>{'use server'; await recalculateEventSignups(event.id)}}><button className="primary">חשב מחדש</button></form><table><thead><tr><th>#</th><th>שם</th><th>סוג</th><th>סטטוס</th><th>תשלום</th><th>פעולות</th></tr></thead><tbody>{state.signups.filter(s=>s.status!=='CANCELLED').map((s,i)=><tr key={s.id}><td>{i+1}</td><td>{s.player_name}</td><td>{playerTypeLabel(s.is_regular)}</td><td>{statusLabels[s.status]}</td><td><form action={async(formData)=>{'use server'; await updatePayment(s.id,event.id,String(formData.get('payment_status')) as PaymentStatus)}}><select name="payment_status" defaultValue={s.payment_status}>{Object.entries(paymentLabels).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select><button className="ghost">שמור</button></form></td><td><form action={async()=>{'use server'; await cancelSignup(s.id,event.id)}}><button className="ghost danger">בטל שחקן</button></form></td></tr>)}</tbody></table></section>}</main>;
+  return (
+    <main>
+      <section className="hero">
+        <h1>ניהול הרשמה לכדורגל</h1>
+        <p>פתיחת משחק, קבועים, תשלום והעתקה לוואטסאפ.</p>
+        <a className="hero-link" href={event ? `/game/${event.id}` : '/'}>
+          חזרה לדף המשחק
+        </a>
+        {event && <WhatsappCopy event={event} lists={state.lists} />}
+      </section>
+
+      <div className="admin-grid">
+        <section className="card">
+          <h2>{event ? 'עריכת משחק' : 'פתיחת משחק חדש'}</h2>
+          <form action={async (formData) => {
+            'use server';
+            await saveEvent(formData);
+          }}>
+            {event && <input type="hidden" name="id" value={event.id} />}
+            <label>שם משחק<input name="title" defaultValue={event?.title || 'כדורגל יום שני'} /></label>
+            <label>תאריך<input type="date" name="game_date" defaultValue={event?.game_date || new Date().toISOString().slice(0, 10)} /></label>
+            <label>שעה<input type="time" name="game_time" defaultValue={event?.game_time || '20:00'} /></label>
+            <label>מקסימום שחקנים<input type="number" name="max_players" defaultValue={event?.max_players || 15} /></label>
+            <label>דדליין תשלום<input type="time" name="payment_deadline" defaultValue={event?.payment_deadline || '17:00'} /></label>
+            <label><span><input style={{ width: 'auto' }} type="checkbox" name="is_open" defaultChecked={event?.is_open ?? true} /> ההרשמה פתוחה</span></label>
+            <button className="primary">שמור משחק</button>
+          </form>
+        </section>
+
+        <section className="card">
+          <h2>שחקנים קבועים</h2>
+          <form action={async (formData) => {
+            'use server';
+            await addRegular(formData);
+          }}>
+            <label>הוסף קבוע<input name="name" placeholder="יוסי כהן" /></label>
+            <button className="primary">הוסף קבוע</button>
+          </form>
+          <RegularPlayersList regulars={regulars} />
+        </section>
+      </div>
+
+      {event && (
+        <section className="card">
+          <h2>נרשמים</h2>
+          <form action={async () => {
+            'use server';
+            await recalculateEventSignups(event.id);
+          }}>
+            <button className="primary">חשב מחדש</button>
+          </form>
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>שם</th>
+                <th>סוג</th>
+                <th>סטטוס</th>
+                <th>תשלום</th>
+                <th>פעולות</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.signups.filter(s => s.status !== 'CANCELLED').map((s, i) => (
+                <tr key={s.id}>
+                  <td>{i + 1}</td>
+                  <td>{s.player_name}</td>
+                  <td>{playerTypeLabel(s.is_regular)}</td>
+                  <td>{statusLabels[s.status]}</td>
+                  <td>
+                    <form action={async (formData) => {
+                      'use server';
+                      await updatePayment(s.id, event.id, String(formData.get('payment_status')) as PaymentStatus);
+                    }}>
+                      <select name="payment_status" defaultValue={s.payment_status}>
+                        {Object.entries(paymentLabels).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                      <button className="ghost">שמור</button>
+                    </form>
+                  </td>
+                  <td>
+                    <form action={async () => {
+                      'use server';
+                      await cancelSignup(s.id, event.id);
+                    }}>
+                      <button className="ghost danger">בטל שחקן</button>
+                    </form>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+    </main>
+  );
 }
