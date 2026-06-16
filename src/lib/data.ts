@@ -33,7 +33,7 @@ export async function loginAdmin(formData: FormData) {
 export async function fetchActiveEvent() { const s = await db(); const { data } = await s.from('events').select('*').order('game_date', { ascending: true }).limit(1).maybeSingle(); return data as Event | null; }
 export async function fetchRegularPlayers() { const s = await db(); const { data } = await s.from('regular_players').select('*').eq('is_active', true).order('name'); return (data || []) as RegularPlayer[]; }
 export async function fetchSignups(eventId: string) { const s = await db(); const { data } = await s.from('signups').select('*').eq('event_id', eventId).order('registered_at'); return (data || []) as Signup[]; }
-export async function fetchEventState(eventId?: string) { const event = eventId ? await (async () => { const s = await db(); const { data } = await s.from('events').select('*').eq('id', eventId).single(); return data as Event; })() : await fetchActiveEvent(); if (!event) return null; await recalculateEventSignups(event.id); const [regulars, signups] = await Promise.all([fetchRegularPlayers(), fetchSignups(event.id)]); return { event, regulars, lists: rankSignups(event, signups), signups }; }
+export async function fetchEventState(eventId?: string) { const event = eventId ? await (async () => { const s = await db(); const { data } = await s.from('events').select('*').eq('id', eventId).single(); return data as Event; })() : await fetchActiveEvent(); if (!event) return null; await recalculateEventSignupsWithoutRevalidation(event.id); const [regulars, signups] = await Promise.all([fetchRegularPlayers(), fetchSignups(event.id)]); return { event, regulars, lists: rankSignups(event, signups), signups }; }
 
 async function syncRegularPlayersForEvent(eventId: string) {
   const s = await db();
@@ -76,10 +76,15 @@ async function syncRegularPlayersForEvent(eventId: string) {
   }));
 }
 
-export async function recalculateEventSignups(eventId: string) {
+async function recalculateEventSignupsWithoutRevalidation(eventId: string) {
   const s = await db(); await syncRegularPlayersForEvent(eventId); const state = await fetchEventStateRaw(eventId); if (!state) throw new Error('אירוע לא נמצא');
   const lists = rankSignups(state.event, state.signups); const active = new Set(lists.active.map(x => x.id)); const waiting = new Set(lists.waiting.map(x => x.id));
   await Promise.all(state.signups.map((x) => s.from('signups').update({ status: active.has(x.id) ? 'ACTIVE' : waiting.has(x.id) ? 'WAITING' : 'CANCELLED', payment_status: lists.active.concat(lists.waiting).some(y => y.id === x.id) && x.payment_status === 'PENDING' && new Date() >= new Date(`${state.event.game_date}T${state.event.payment_deadline}:00`) ? 'UNPAID_AFTER_DEADLINE' : x.payment_status, updated_at: new Date().toISOString() }).eq('id', x.id)));
+  return lists;
+}
+
+export async function recalculateEventSignups(eventId: string) {
+  const lists = await recalculateEventSignupsWithoutRevalidation(eventId);
   revalidatePath('/'); revalidatePath(`/game/${eventId}`); revalidatePath('/admin'); return lists;
 }
 async function fetchEventStateRaw(eventId: string) { const s = await db(); const [{ data: event }, { data: signups }] = await Promise.all([s.from('events').select('*').eq('id', eventId).single(), s.from('signups').select('*').eq('event_id', eventId)]); return event ? { event: event as Event, signups: (signups || []) as Signup[] } : null; }
