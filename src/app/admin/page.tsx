@@ -13,7 +13,7 @@ import {
 } from '@/lib/data';
 import { paymentLabels, playerTypeLabel, statusLabels } from '@/lib/labels';
 import { WhatsappCopy } from '@/components/WhatsappCopy';
-import type { PaymentStatus, RegularPlayer } from '@/lib/types';
+import type { RegularPlayer } from '@/lib/types';
 
 function RegularPlayersList({ regulars }: { regulars: RegularPlayer[] }) {
   return (
@@ -108,6 +108,7 @@ export default async function AdminPage() {
                 <th>סוג</th>
                 <th>סטטוס</th>
                 <th>תשלום</th>
+                <th>אישור תשלום</th>
                 <th>פעולות</th>
               </tr>
             </thead>
@@ -119,15 +120,31 @@ export default async function AdminPage() {
                   <td>{playerTypeLabel(s.is_regular)}</td>
                   <td>{statusLabels[s.status]}</td>
                   <td>
-                    <form action={async (formData) => {
-                      'use server';
-                      await updatePayment(s.id, event.id, String(formData.get('payment_status')) as PaymentStatus);
-                    }}>
-                      <select name="payment_status" defaultValue={s.payment_status}>
-                        {Object.entries(paymentLabels).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-                      </select>
-                      <button className="ghost">שמור</button>
-                    </form>
+                    <span className={s.is_paid ? 'payment-paid' : 'payment-pending'}>
+                      {paymentLabels[s.payment_status]}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="payment-actions">
+                      <form action={async () => {
+                        'use server';
+                        await updatePayment(s.id, event.id, 'PAID_SINGLE');
+                      }}>
+                        <button className="ghost">שולם למשחק אחד</button>
+                      </form>
+                      <form action={async () => {
+                        'use server';
+                        await updatePayment(s.id, event.id, 'PAID_MONTHLY');
+                      }}>
+                        <button className="ghost">שולם חודשי</button>
+                      </form>
+                      <form action={async () => {
+                        'use server';
+                        await updatePayment(s.id, event.id, 'PENDING');
+                      }}>
+                        <button className="ghost danger">סמן כממתין</button>
+                      </form>
+                    </div>
                   </td>
                   <td>
                     <form action={async () => {

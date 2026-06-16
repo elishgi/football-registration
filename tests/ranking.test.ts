@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { rankSignups } from '../src/lib/ranking';
 import type { Event, Signup } from '../src/lib/types';
 const event: Event = { id:'00000000-0000-0000-0000-000000000001', title:'משחק', game_date:'2026-06-16', game_time:'20:00', max_players:15, payment_deadline:'17:00', is_open:true };
-const s=(i:number, regular=false, payment='PENDING'): Signup => ({ id:String(i), event_id:event.id, player_name:`שחקן ${i}`, regular_player_id:null, is_regular:regular, registered_at:`2026-06-16T10:${String(i).padStart(2,'0')}:00Z`, cancelled_at:null, status:'WAITING', payment_status:payment as Signup['payment_status'] });
+const s=(i:number, regular=false, payment='PENDING'): Signup => ({ id:String(i), event_id:event.id, player_name:`שחקן ${i}`, regular_player_id:null, is_regular:regular, registered_at:`2026-06-16T10:${String(i).padStart(2,'0')}:00Z`, cancelled_at:null, status:'WAITING', payment_status:payment as Signup['payment_status'], is_paid: payment === 'PAID_MONTHLY' || payment === 'PAID_SINGLE' });
 describe('rankSignups',()=>{
  it('keeps fewer than max all active and no waiting',()=>{ const lists=rankSignups(event, Array.from({length:10},(_,i)=>s(i+1)), new Date('2026-06-16T12:00:00')); expect(lists.active).toHaveLength(10); expect(lists.waiting).toHaveLength(0); });
  it('puts 16th guest on waiting list',()=>{ const lists=rankSignups(event, Array.from({length:16},(_,i)=>s(i+1)), new Date('2026-06-16T12:00:00')); expect(lists.active).toHaveLength(15); expect(lists.waiting[0].id).toBe('16'); });
